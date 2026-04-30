@@ -551,7 +551,10 @@ CRITICAL STYLE REQUIREMENTS:
         }
       }
 
-      const centerIndex = activeIndex !== -1 ? activeIndex : (upcomingIndex !== -1 ? upcomingIndex : 0);
+      const centerIndex = activeIndex !== -1 ? activeIndex : 
+        (upcomingIndex !== -1 ? upcomingIndex : 
+          (srtData.length > 0 && currTime > srtData[srtData.length - 1].end ? srtData.length - 1 : 0)
+        );
 
       if (srtData.length > 0) {
         ctx.textAlign = 'center';
@@ -560,85 +563,121 @@ CRITICAL STYLE REQUIREMENTS:
         let accumulateY = 0;
         const itemYs = srtData.map(sub => {
           const lines = sub.text.split('\n').length;
-          const blockHeight = lines * 60;
+          const blockHeight = lines * 70; // Uniform block size calculation
           const y = accumulateY + blockHeight / 2;
-          accumulateY += blockHeight + 40; // 40px spacing between subtitle blocks
+          accumulateY += blockHeight + 35; // 35px spacing between subtitle blocks
           return y;
         });
 
         const targetScrollY = centerIndex < itemYs.length ? itemYs[centerIndex] : 0;
         
-        // Initializing currentScrollY dynamically on stateRef.current
+        // Dynamic smooth scroll initialization
         if (!(stateRef.current as any).isScrollInitialized) {
           (stateRef.current as any).currentScrollY = targetScrollY;
+          (stateRef.current as any).scrollVelocity = 0;
           (stateRef.current as any).isScrollInitialized = true;
         } else {
-          (stateRef.current as any).currentScrollY += (targetScrollY - (stateRef.current as any).currentScrollY) * 0.08;
+          // Spring physics for dynamic and smooth scroll
+          const diff = targetScrollY - (stateRef.current as any).currentScrollY;
+          (stateRef.current as any).scrollVelocity += diff * 0.012; // Spring tension
+          (stateRef.current as any).scrollVelocity *= 0.82; // Friction dampening
+          (stateRef.current as any).currentScrollY += (stateRef.current as any).scrollVelocity;
         }
 
         const centerBaseY = canvas.height - 350; 
         const currentScrollY = (stateRef.current as any).currentScrollY;
 
+        // Initialize smoothActives tracking array
+        if (!(stateRef.current as any).smoothActives || (stateRef.current as any).smoothActives.length !== srtData.length) {
+          (stateRef.current as any).smoothActives = new Array(srtData.length).fill(0);
+        }
+        const smoothActives = (stateRef.current as any).smoothActives;
+
         for (let i = 0; i < srtData.length; i++) {
-          const yOffset = centerBaseY + itemYs[i] - currentScrollY;
+          const rawYOffset = centerBaseY + itemYs[i] - currentScrollY;
           
           // Cull items too far off-screen
-          if (yOffset < centerBaseY - 450 || yOffset > centerBaseY + 450) continue;
+          if (rawYOffset < centerBaseY - 550 || rawYOffset > centerBaseY + 550) {
+              const isActive = (i === activeIndex);
+              smoothActives[i] += ((isActive ? 1 : 0) - smoothActives[i]) * 0.12; // Update state even when culled
+              continue;
+          }
 
           const isActive = (i === activeIndex);
+          const targetActive = isActive ? 1 : 0;
+          smoothActives[i] += (targetActive - smoothActives[i]) * 0.12; // Silky easing
+          const actRatio = Math.max(0, Math.min(1, smoothActives[i]));
+
           const sub = srtData[i];
           const lines = sub.text.split('\n');
           
-          const baseLineHeight = isActive ? 85 : 55;
-          const blockHeight = lines.length * baseLineHeight;
-          const startY = yOffset - (blockHeight / 2) + (baseLineHeight / 2);
-
-          const subTimeActive = isActive ? (currTime - sub.start) : 0;
-          const distFromCenter = Math.abs(yOffset - centerBaseY);
+          // Normalized distance for parallax and fading (-1 to 1 around focal point)
+          const distFromCenter = Math.abs(rawYOffset - centerBaseY);
+          const normalizedDist = distFromCenter / 450; 
           
-          // Calculate alpha based on distance from center to fade out edges
-          const edgeFade = Math.max(0, 1 - (distFromCenter / 350));
-          const alphaMod = edgeFade;
+          // Parallax Y offset compresses items smoothly towards edges
+          const signY = Math.sign(rawYOffset - centerBaseY);
+          const parallaxShift = (1 - Math.cos(Math.min(1, normalizedDist) * Math.PI / 2)) * 100;
+          const finalYOffset = rawYOffset - signY * parallaxShift;
+
+          // Compute uniform continuous scaling base
+          let baseScale = Math.max(0.4, 1 - Math.pow(Math.min(1, normalizedDist), 1.6) * 0.5);
+          
+          const subTimeActive = isActive ? (currTime - sub.start) : 0;
+          let driftScale = 0;
+          if (isActive && !isPreview && subTimeActive >= 0) {
+            driftScale = subTimeActive * 0.005; // Slow elegant drift
+          }
+          
+          // actRatio drives final size so transition from small to big is SILKY smooth
+          const renderScale = baseScale * (0.65 + 0.35 * actRatio) + (driftScale * actRatio);
+
+          // Calculate alpha continuously based on distance
+          const alphaMod = Math.max(0, 1 - Math.pow(Math.min(1, normalizedDist), 1.2));
+          
+          const baseLineHeight = 75; // Internal line height for multi-line subtitles
+          const blockHeight = lines.length * baseLineHeight;
+          const startY = finalYOffset - (blockHeight / 2) + (baseLineHeight / 2);
           
           lines.forEach((line, lineIdx) => {
-            const y = startY + (lineIdx * baseLineHeight);
+            const y = startY + (lineIdx * baseLineHeight * (baseScale * (0.65 + 0.35 * actRatio))); // adjust internal spacing smoothly
             
             ctx.save();
             ctx.translate(canvas.width / 2, y);
+            ctx.scale(renderScale, renderScale);
             
-            if (isActive) {
-              let scale = 1;
-              if (!isPreview) {
-                if (subTimeActive < 0) {
-                  const progress = Math.max(0, 1 - Math.abs(subTimeActive) / PRE_ACTIVE_OFFSET);
-                  scale = 0.95 + 0.05 * progress;
-                } else if (subTimeActive < 0.3) {
-                  const progress = subTimeActive / 0.3;
-                  scale = 1 + Math.sin(progress * Math.PI) * 0.08; // Pop effect up to 1.08
-                } else {
-                  scale = 1 + (subTimeActive - 0.3) * 0.01;
-                }
-              }
-              ctx.scale(scale, scale);
-              if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = '6px'; }
-              drawTextWithTexture(line, 0, 0, 72, alphaMod, false);
-              if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = '0px'; }
-            } else {
-              ctx.font = `600 36px ${fontStack}`;
-              if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = '4px'; }
-              ctx.lineJoin = 'round';
-              ctx.lineWidth = 8;
-              ctx.shadowColor = `rgba(0, 0, 0, ${0.8 * alphaMod})`;
-              ctx.shadowBlur = 10;
-              ctx.shadowOffsetY = 4;
-              ctx.strokeStyle = `rgba(10, 5, 0, ${0.8 * alphaMod})`;
+            // Parametric completely smooth rendering
+            ctx.font = `600 64px ${fontStack}`;
+            const spacing = Math.round(3 + 3 * actRatio);
+            if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = `${spacing}px`; }
+            
+            ctx.lineJoin = 'round';
+            ctx.lineWidth = 10 + actRatio * 2;
+            ctx.shadowColor = `rgba(0, 0, 0, ${(0.9 + actRatio * 0.1) * alphaMod})`;
+            ctx.shadowBlur = 12 + actRatio * 13;
+            ctx.shadowOffsetY = 6 + actRatio * 2;
+            ctx.strokeStyle = `rgba(10, 5, 0, ${(0.8 + actRatio * 0.2) * alphaMod})`;
+            ctx.strokeText(line, 0, 0);
+            
+            ctx.shadowColor = 'transparent';
+            
+            const r2 = Math.round(255 - 30 * actRatio);
+            const b2 = Math.round(255 - 75 * actRatio);
+            
+            const grad = ctx.createLinearGradient(0, -40, 0, 20);
+            grad.addColorStop(0, `rgba(255, 255, 255, ${alphaMod})`);
+            grad.addColorStop(1, `rgba(255, ${r2}, ${b2}, ${alphaMod * (0.45 + 0.55 * actRatio)})`);
+            
+            ctx.fillStyle = grad;
+            ctx.fillText(line, 0, 0);
+            
+            if (actRatio > 0.05) {
+              // Inner bright stroke for metallic shine gracefully fading in
+              ctx.lineWidth = 1.5;
+              ctx.strokeStyle = `rgba(255, 255, 255, ${0.9 * alphaMod * actRatio})`;
               ctx.strokeText(line, 0, 0);
-              
-              ctx.shadowColor = 'transparent';
-              ctx.fillStyle = `rgba(255, 255, 255, ${0.6 * alphaMod})`;
-              ctx.fillText(line, 0, 0);
-              if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = '0px'; }
             }
+            if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = '0px'; }
             
             ctx.restore();
           });
@@ -674,7 +713,13 @@ CRITICAL STYLE REQUIREMENTS:
           
           for (let i = 0; i < numBars; i++) {
             const dataIndex = Math.floor(i * (bufferLength / 2 / numBars));
-            const val = dataArray[dataIndex] / 255.0;
+            let val = dataArray[dataIndex] / 255.0;
+            
+            // Add a slight bass boost to the lower frequencies for impact
+            if (i < numBars * 0.2) {
+              val = Math.min(1, val * (1 + (bassVolume / 255) * 0.2));
+            }
+            
             const height = Math.max(val * 400, 10);
             
             const x = i * barSpacing;
@@ -687,9 +732,11 @@ CRITICAL STYLE REQUIREMENTS:
               ctx.rect(x, y, barWidth, height);
             }
 
+            // Frequency-based color (warm to cool mapping across spectrum)
+            const hue = (i / numBars) * 280; // Maps from Red (0) to Purple (280)
             const grad = ctx.createLinearGradient(0, y, 0, canvas.height);
-            grad.addColorStop(0, 'rgba(255, 255, 255, 0.9)');
-            grad.addColorStop(1, 'rgba(255, 200, 150, 0.2)');
+            grad.addColorStop(0, `hsla(${hue}, 100%, 75%, 0.9)`);
+            grad.addColorStop(1, `hsla(${(hue + 30) % 360}, 100%, 50%, 0.1)`);
             ctx.fillStyle = grad;
             ctx.fill();
           }
@@ -699,6 +746,14 @@ CRITICAL STYLE REQUIREMENTS:
           const barSpacing = Math.floor((canvas.width * 0.7) / numBars); 
           const barWidth = 6; 
           const startX = (canvas.width - (numBars * barSpacing)) / 2;
+          
+          // Subtle pulse based on bass frequency
+          const pulse = 1 + Math.max(0, (bassVolume / 255) - 0.3) * 0.15; // Only pulse on strong bass
+          
+          ctx.save();
+          ctx.translate(canvas.width / 2, visualizerY);
+          ctx.scale(pulse, pulse);
+          ctx.translate(-(canvas.width / 2), -visualizerY);
           
           for (let i = 0; i < numBars; i++) {
             const dataIndex = Math.floor(i * (bufferLength / 2.5 / numBars));
@@ -725,9 +780,12 @@ CRITICAL STYLE REQUIREMENTS:
           ctx.beginPath();
           ctx.moveTo(startX - 20, visualizerY);
           ctx.lineTo(startX + numBars * barSpacing + 20, visualizerY);
-          ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-          ctx.lineWidth = 3;
+          const lineAlpha = 0.4 + (bassVolume / 255) * 0.4;
+          ctx.strokeStyle = `rgba(255, 255, 255, ${lineAlpha})`;
+          ctx.lineWidth = 3 + (bassVolume / 255) * 2;
           ctx.stroke();
+          
+          ctx.restore();
         }
 
         ctx.shadowColor = 'transparent';

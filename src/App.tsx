@@ -8,12 +8,6 @@ interface Subtitle {
   text: string;
 }
 
-const DEFAULT_ASSET_BASENAME = '我爱你胜过这世界-陈立强-R&B';
-const DEFAULT_AUDIO_URL = new URL('../素材/我爱你胜过这世界-陈立强-R&B.wav', import.meta.url).href;
-const DEFAULT_SRT_URL = new URL('../素材/我爱你胜过这世界-陈立强-R&B.srt', import.meta.url).href;
-const DEFAULT_COVER_URL = new URL('../素材/封面图.jpg', import.meta.url).href;
-const DEFAULT_AUDIO_MIME_TYPE = 'audio/wav';
-
 function timeToSeconds(timeStr: string) {
   if (!timeStr) return 0;
   const parts = timeStr.replace(',', '.').split(':');
@@ -86,13 +80,13 @@ function drawImageCover(ctx: CanvasRenderingContext2D, img: HTMLImageElement, w:
 
 export default function App() {
   // Input State
-  const [title, setTitle] = useState('我爱你胜过这世界');
-  const [subtitle1, setSubtitle1] = useState('原唱：陈立强');
+  const [title, setTitle] = useState('春天里');
+  const [subtitle1, setSubtitle1] = useState('原唱：汪峰');
   const [subtitle2, setSubtitle2] = useState('风格：R&B');
   const [srtData, setSrtData] = useState<Subtitle[]>([]);
   
   // Media State
-  const [audioUrl, setAudioUrl] = useState<string | null>(DEFAULT_AUDIO_URL);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [imageElement, setImageElement] = useState<HTMLImageElement | null>(null);
   const [videoOutputUrl, setVideoOutputUrl] = useState<string | null>(null);
@@ -138,44 +132,6 @@ export default function App() {
   useEffect(() => {
     stateRef.current = { title, subtitle1, subtitle2, srtData, imageElement, visualizerStyle };
   }, [title, subtitle1, subtitle2, srtData, imageElement, visualizerStyle]);
-
-  useEffect(() => {
-    let isMounted = true;
-
-    fetch(DEFAULT_SRT_URL)
-      .then(response => {
-        if (!response.ok) throw new Error(`Failed to load default SRT: ${response.status}`);
-        return response.text();
-      })
-      .then(text => {
-        if (!isMounted) return;
-        setSrtRaw(text);
-        setSrtData(parseSrt(text));
-      })
-      .catch(err => console.warn(err));
-
-    fetch(DEFAULT_AUDIO_URL)
-      .then(response => {
-        if (!response.ok) throw new Error(`Failed to load default audio: ${response.status}`);
-        return response.blob();
-      })
-      .then(blob => {
-        if (!isMounted) return;
-        setAudioFile(new File([blob], `${DEFAULT_ASSET_BASENAME}.wav`, { type: DEFAULT_AUDIO_MIME_TYPE }));
-      })
-      .catch(err => console.warn(err));
-
-    const img = new Image();
-    img.onload = () => {
-      if (isMounted) setImageElement(img);
-    };
-    img.onerror = () => console.warn('Failed to load default cover image.');
-    img.src = DEFAULT_COVER_URL;
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
 
   const updateSrtElement = (index: number, field: 'start'|'end'|'text', value: string|number) => {
     const newSrt = [...srtData];

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Play, Pause, Download, Video, Image as ImageIcon, Music, Type, AlignLeft, Sparkles } from 'lucide-react';
+import { Upload, Play, Pause, Download, Video, Image as ImageIcon, Music, Type, AlignLeft, Sparkles, Monitor, Smartphone } from 'lucide-react';
 import { GoogleGenAI } from '@google/genai';
 
 interface Subtitle {
@@ -7,6 +7,38 @@ interface Subtitle {
   end: number;
   text: string;
 }
+
+type VideoOrientation = 'landscape' | 'portrait';
+type VisualizerStyle = 'waveform' | 'spectrum';
+
+const VIDEO_ORIENTATION_CONFIG: Record<VideoOrientation, {
+  label: string;
+  width: number;
+  height: number;
+  aspectRatio: '16:9' | '9:16';
+}> = {
+  landscape: {
+    label: 'Landscape',
+    width: 1920,
+    height: 1080,
+    aspectRatio: '16:9',
+  },
+  portrait: {
+    label: 'Portrait',
+    width: 1080,
+    height: 1920,
+    aspectRatio: '9:16',
+  },
+};
+
+const DEFAULT_ASSETS = {
+  audio: {
+    url: '/default-assets/default-audio.wav',
+    filename: '当-动力火车-R&B.wav',
+  },
+  image: '/default-assets/default-cover.jpg',
+  srt: '/default-assets/default-subtitles.srt',
+};
 
 function timeToSeconds(timeStr: string) {
   if (!timeStr) return 0;
@@ -78,6 +110,101 @@ function drawImageCover(ctx: CanvasRenderingContext2D, img: HTMLImageElement, w:
   ctx.drawImage(img, renderX, renderY, renderW, renderH);
 }
 
+function getSupportedVideoMimeType(format: 'webm' | 'mp4') {
+  const typesToTry = format === 'mp4'
+    ? ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus']
+    : ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+
+  for (const type of typesToTry) {
+    if (MediaRecorder.isTypeSupported(type)) {
+      return type;
+    }
+  }
+
+  return '';
+}
+
+function downloadBlobUrl(url: string, filename: string) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+async function findHighlightSegment(audioFile: File, maxDuration = 60): Promise<{ start: number; end: number; score: number }> {
+  const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+  const ctx = new AudioContextClass();
+  const arrayBuffer = await audioFile.arrayBuffer();
+  const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+  await ctx.close?.();
+
+  const totalDuration = audioBuffer.duration;
+  const segmentDuration = Math.min(maxDuration, totalDuration);
+  if (totalDuration <= maxDuration) {
+    return { start: 0, end: totalDuration, score: 1 };
+  }
+
+  const frameSeconds = 0.5;
+  const frameSize = Math.max(1, Math.floor(audioBuffer.sampleRate * frameSeconds));
+  const frameCount = Math.max(1, Math.floor(audioBuffer.length / frameSize));
+  const energies = new Array(frameCount).fill(0);
+  const channelCount = audioBuffer.numberOfChannels;
+
+  for (let frame = 0; frame < frameCount; frame++) {
+    const start = frame * frameSize;
+    const end = Math.min(audioBuffer.length, start + frameSize);
+    let sum = 0;
+    let samples = 0;
+
+    for (let channel = 0; channel < channelCount; channel++) {
+      const data = audioBuffer.getChannelData(channel);
+      for (let i = start; i < end; i++) {
+        sum += data[i] * data[i];
+      }
+      samples += end - start;
+    }
+
+    energies[frame] = Math.sqrt(sum / Math.max(1, samples));
+  }
+
+  const maxEnergy = Math.max(...energies, 0.0001);
+  const normalized = energies.map(value => value / maxEnergy);
+  const smooth = normalized.map((_, index) => {
+    const from = Math.max(0, index - 2);
+    const to = Math.min(normalized.length - 1, index + 2);
+    let sum = 0;
+    for (let i = from; i <= to; i++) sum += normalized[i];
+    return sum / (to - from + 1);
+  });
+
+  const windowFrames = Math.max(1, Math.floor(segmentDuration / frameSeconds));
+  let bestStartFrame = 0;
+  let bestScore = -Infinity;
+
+  for (let startFrame = 0; startFrame <= frameCount - windowFrames; startFrame++) {
+    const endFrame = startFrame + windowFrames;
+    const window = smooth.slice(startFrame, endFrame);
+    const average = window.reduce((sum, value) => sum + value, 0) / window.length;
+    const peak = Math.max(...window);
+    const variance = window.reduce((sum, value) => sum + Math.pow(value - average, 2), 0) / window.length;
+    const startSeconds = startFrame * frameSeconds;
+    const endSeconds = startSeconds + segmentDuration;
+    const introPenalty = startSeconds < 8 ? (8 - startSeconds) / 80 : 0;
+    const outroPenalty = totalDuration - endSeconds < 8 ? (8 - (totalDuration - endSeconds)) / 80 : 0;
+    const score = average * 0.72 + peak * 0.22 + Math.sqrt(variance) * 0.06 - introPenalty - outroPenalty;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestStartFrame = startFrame;
+    }
+  }
+
+  const start = Math.min(Math.max(0, bestStartFrame * frameSeconds), Math.max(0, totalDuration - segmentDuration));
+  return { start, end: Math.min(totalDuration, start + segmentDuration), score: bestScore };
+}
+
 export default function App() {
   // Input State
   const [title, setTitle] = useState('春天里');
@@ -89,7 +216,12 @@ export default function App() {
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [imageElement, setImageElement] = useState<HTMLImageElement | null>(null);
-  const [videoOutputUrl, setVideoOutputUrl] = useState<string | null>(null);
+  const [fullRecordingUrl, setFullRecordingUrl] = useState<string | null>(null);
+  const [fullRecordingBlob, setFullRecordingBlob] = useState<Blob | null>(null);
+  const [smartCropUrl, setSmartCropUrl] = useState<string | null>(null);
+  const [isSmartCropping, setIsSmartCropping] = useState(false);
+  const [smartCropProgress, setSmartCropProgress] = useState(0);
+  const [smartCropRange, setSmartCropRange] = useState<{ start: number; end: number } | null>(null);
 
   // Playback/Recording State
   const [isPlaying, setIsPlaying] = useState(false);
@@ -111,9 +243,11 @@ export default function App() {
 
   // Export Settings
   const [exportFormat, setExportFormat] = useState<'webm' | 'mp4'>('mp4');
+  const [videoOrientation, setVideoOrientation] = useState<VideoOrientation>('portrait');
+  const videoConfig = VIDEO_ORIENTATION_CONFIG[videoOrientation];
+  const isPortrait = videoOrientation === 'portrait';
 
   // Visualizer settings
-  type VisualizerStyle = 'waveform' | 'spectrum';
   const [visualizerStyle, setVisualizerStyle] = useState<VisualizerStyle>('waveform');
 
   // Refs
@@ -127,11 +261,66 @@ export default function App() {
   const particlesRef = useRef<{x: number, y: number, vx: number, vy: number, alpha: number, size: number, hue: number}[]>([]);
   
   // Ref for canvas loop to access latest state without restarting loop
-  const stateRef = useRef({ title, subtitle1, subtitle2, srtData, imageElement, visualizerStyle });
+  const stateRef = useRef({ title, subtitle1, subtitle2, srtData, imageElement, visualizerStyle, videoOrientation });
 
   useEffect(() => {
-    stateRef.current = { title, subtitle1, subtitle2, srtData, imageElement, visualizerStyle };
-  }, [title, subtitle1, subtitle2, srtData, imageElement, visualizerStyle]);
+    stateRef.current = { title, subtitle1, subtitle2, srtData, imageElement, visualizerStyle, videoOrientation };
+  }, [title, subtitle1, subtitle2, srtData, imageElement, visualizerStyle, videoOrientation]);
+
+  useEffect(() => {
+    let isCancelled = false;
+    const objectUrls: string[] = [];
+
+    const loadDefaultAssets = async () => {
+      try {
+        const [audioResponse, srtResponse] = await Promise.all([
+          fetch(DEFAULT_ASSETS.audio.url),
+          fetch(DEFAULT_ASSETS.srt),
+        ]);
+
+        if (!audioResponse.ok) throw new Error(`无法加载默认音频：${audioResponse.status}`);
+        if (!srtResponse.ok) throw new Error(`无法加载默认字幕：${srtResponse.status}`);
+
+        const [audioBlob, srtText] = await Promise.all([
+          audioResponse.blob(),
+          srtResponse.text(),
+        ]);
+
+        if (isCancelled) return;
+
+        const audioFile = new File([audioBlob], DEFAULT_ASSETS.audio.filename, {
+          type: audioBlob.type || 'audio/wav',
+        });
+        const audioObjectUrl = URL.createObjectURL(audioBlob);
+        objectUrls.push(audioObjectUrl);
+
+        setAudioFile(audioFile);
+        setAudioUrl(audioObjectUrl);
+        setFullRecordingUrl(null);
+        setSmartCropUrl(null);
+        setFullRecordingBlob(null);
+        setSmartCropRange(null);
+        setSrtRaw(srtText);
+        setSrtData(parseSrt(srtText));
+        extractMetadata(DEFAULT_ASSETS.audio.filename.replace(/\.[^/.]+$/, ""));
+
+        const img = new Image();
+        img.onload = () => {
+          if (!isCancelled) setImageElement(img);
+        };
+        img.src = DEFAULT_ASSETS.image;
+      } catch (err) {
+        console.error("Failed to load default assets:", err);
+      }
+    };
+
+    loadDefaultAssets();
+
+    return () => {
+      isCancelled = true;
+      objectUrls.forEach(url => URL.revokeObjectURL(url));
+    };
+  }, []);
 
   const updateSrtElement = (index: number, field: 'start'|'end'|'text', value: string|number) => {
     const newSrt = [...srtData];
@@ -174,7 +363,7 @@ CRITICAL STYLE REQUIREMENTS:
             },
             config: {
               imageConfig: {
-                    aspectRatio: "16:9",
+                    aspectRatio: videoConfig.aspectRatio,
                     imageSize: "1K"
                 }
             },
@@ -234,7 +423,10 @@ CRITICAL STYLE REQUIREMENTS:
     if (file) {
       setAudioFile(file);
       setAudioUrl(URL.createObjectURL(file));
-      setVideoOutputUrl(null); // Reset output when new audio loaded
+      setFullRecordingUrl(null); // Reset output when new audio loaded
+      setFullRecordingBlob(null);
+      setSmartCropUrl(null);
+      setSmartCropRange(null);
       
       const filename = file.name.replace(/\.[^/.]+$/, "");
       extractMetadata(filename);
@@ -370,7 +562,25 @@ CRITICAL STYLE REQUIREMENTS:
       const ctx = canvas?.getContext('2d');
       if (!canvas || !ctx) return;
 
-      const { title, subtitle1, subtitle2, srtData, imageElement } = stateRef.current;
+      const { title, subtitle1, subtitle2, srtData, imageElement, videoOrientation } = stateRef.current;
+      const isPortrait = videoOrientation === 'portrait';
+      const shortSide = Math.min(canvas.width, canvas.height);
+      const frameMargin = Math.round(shortSide * (isPortrait ? 0.045 : 0.055));
+      const cornerLen = Math.round(shortSide * 0.02);
+      const titleY = Math.round(canvas.height * (isPortrait ? 0.17 : 0.296));
+      const titleFontSize = Math.round(shortSide * (isPortrait ? 0.108 : 0.148));
+      const titleLetterSpacing = Math.round(shortSide * (isPortrait ? 0.012 : 0.019));
+      const metaY = Math.round(canvas.height * (isPortrait ? 0.055 : 0.093));
+      const subFontSize = Math.round(shortSide * (isPortrait ? 0.026 : 0.03));
+      const subtitleY1 = titleY + Math.round(titleFontSize * 0.62);
+      const subtitleY2 = subtitleY1 + Math.round(subFontSize * 1.6);
+      const lyricCenterY = Math.round(canvas.height * (isPortrait ? 0.62 : 0.676));
+      const lyricLineHeight = Math.round(shortSide * (isPortrait ? 0.062 : 0.069));
+      const lyricFontSize = Math.round(shortSide * (isPortrait ? 0.05 : 0.059));
+      const lyricBlockGap = Math.round(lyricLineHeight * (isPortrait ? 0.42 : 0.47));
+      const lyricCullDistance = Math.round(canvas.height * (isPortrait ? 0.32 : 0.51));
+      const lyricFadeDistance = Math.round(canvas.height * (isPortrait ? 0.23 : 0.42));
+      const visualizerY = Math.round(canvas.height - shortSide * (isPortrait ? 0.11 : 0.11));
       
       // Clear
       ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -385,35 +595,36 @@ CRITICAL STYLE REQUIREMENTS:
 
       // Add subtle elegant gradients to ensure typography stands out against any complex oil painting
       // Top gradient for title area
-      const topGrad = ctx.createLinearGradient(0, 0, 0, 600);
+      const topGradientHeight = Math.round(canvas.height * (isPortrait ? 0.34 : 0.56));
+      const topGrad = ctx.createLinearGradient(0, 0, 0, topGradientHeight);
       topGrad.addColorStop(0, 'rgba(0,0,0,0.5)');
       topGrad.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.fillStyle = topGrad;
-      ctx.fillRect(0, 0, canvas.width, 600);
+      ctx.fillRect(0, 0, canvas.width, topGradientHeight);
 
       // Bottom gradient for lyrics and visualizer
-      const bottomGrad = ctx.createLinearGradient(0, canvas.height - 500, 0, canvas.height);
+      const bottomGradientHeight = Math.round(canvas.height * (isPortrait ? 0.42 : 0.46));
+      const bottomGrad = ctx.createLinearGradient(0, canvas.height - bottomGradientHeight, 0, canvas.height);
       bottomGrad.addColorStop(0, 'rgba(0,0,0,0)');
       bottomGrad.addColorStop(1, 'rgba(0,0,0,0.7)');
       ctx.fillStyle = bottomGrad;
-      ctx.fillRect(0, canvas.height - 500, canvas.width, 500);
+      ctx.fillRect(0, canvas.height - bottomGradientHeight, canvas.width, bottomGradientHeight);
 
       // Add a cinematic/editorial inner frame
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
       ctx.lineWidth = 1;
-      ctx.strokeRect(60, 60, canvas.width - 120, canvas.height - 120);
+      ctx.strokeRect(frameMargin, frameMargin, canvas.width - frameMargin * 2, canvas.height - frameMargin * 2);
 
       // Corner accents
       ctx.beginPath();
-      const cornerLen = 20;
       // Top Left
-      ctx.moveTo(60, 60 + cornerLen); ctx.lineTo(60, 60); ctx.lineTo(60 + cornerLen, 60);
+      ctx.moveTo(frameMargin, frameMargin + cornerLen); ctx.lineTo(frameMargin, frameMargin); ctx.lineTo(frameMargin + cornerLen, frameMargin);
       // Top Right
-      ctx.moveTo(canvas.width - 60 - cornerLen, 60); ctx.lineTo(canvas.width - 60, 60); ctx.lineTo(canvas.width - 60, 60 + cornerLen);
+      ctx.moveTo(canvas.width - frameMargin - cornerLen, frameMargin); ctx.lineTo(canvas.width - frameMargin, frameMargin); ctx.lineTo(canvas.width - frameMargin, frameMargin + cornerLen);
       // Bottom Left
-      ctx.moveTo(60, canvas.height - 60 - cornerLen); ctx.lineTo(60, canvas.height - 60); ctx.lineTo(60 + cornerLen, canvas.height - 60);
+      ctx.moveTo(frameMargin, canvas.height - frameMargin - cornerLen); ctx.lineTo(frameMargin, canvas.height - frameMargin); ctx.lineTo(frameMargin + cornerLen, canvas.height - frameMargin);
       // Bottom Right
-      ctx.moveTo(canvas.width - 60 - cornerLen, canvas.height - 60); ctx.lineTo(canvas.width - 60, canvas.height - 60); ctx.lineTo(canvas.width - 60, canvas.height - 60 - cornerLen);
+      ctx.moveTo(canvas.width - frameMargin - cornerLen, canvas.height - frameMargin); ctx.lineTo(canvas.width - frameMargin, canvas.height - frameMargin); ctx.lineTo(canvas.width - frameMargin, canvas.height - frameMargin - cornerLen);
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
       ctx.lineWidth = 1.5;
       ctx.stroke();
@@ -442,11 +653,11 @@ CRITICAL STYLE REQUIREMENTS:
 
           // Drop shadow for 3D separation
           ctx.shadowColor = `rgba(0, 0, 0, ${0.9 * alpha})`;
-          ctx.shadowBlur = isMainTitle ? 40 : 25;
-          ctx.shadowOffsetY = isMainTitle ? 15 : 8;
+          ctx.shadowBlur = isMainTitle ? fontSize * 0.25 : fontSize * 0.55;
+          ctx.shadowOffsetY = isMainTitle ? fontSize * 0.09 : fontSize * 0.22;
 
           // Thick Outline (Dark Brown/Black)
-          ctx.lineWidth = isMainTitle ? 20 : 12;
+          ctx.lineWidth = isMainTitle ? fontSize * 0.125 : fontSize * 0.3;
           ctx.strokeStyle = `rgba(10, 5, 0, ${1.0 * alpha})`;
           ctx.lineJoin = 'round';
           
@@ -466,11 +677,11 @@ CRITICAL STYLE REQUIREMENTS:
       };
 
       // Top metadata (Decorative)
-      ctx.font = `italic 16px ${fontStack}`;
+      ctx.font = `italic ${Math.round(shortSide * 0.015)}px ${fontStack}`;
       ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
       ctx.textAlign = 'center';
       if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = '12px'; }
-      ctx.fillText('AUDIO VISUAL // 01', canvas.width / 2, 100);
+      ctx.fillText('AUDIO VISUAL // 01', canvas.width / 2, metaY);
       if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = '0px'; }
 
       // 2. Draw Title & Meta
@@ -491,30 +702,33 @@ CRITICAL STYLE REQUIREMENTS:
       
       // Main Title
       ctx.save();
-      ctx.translate(canvas.width / 2, 320);
+      ctx.translate(canvas.width / 2, titleY);
       ctx.scale(titleScale, titleScale);
-      if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = '20px'; }
-      drawTextWithTexture(title, 0, 0, 160, titleFade, true); 
+      if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = `${titleLetterSpacing}px`; }
+      drawTextWithTexture(title, 0, 0, titleFontSize, titleFade, true); 
       if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = '0px'; }
       ctx.restore();
 
       // Subtitles directly below title
       const maxSubAlpha = Math.max(sub1Alpha, sub2Alpha);
       if (maxSubAlpha > 0) {
-        ctx.font = `600 32px ${fontStack}`; 
+        ctx.font = `600 ${subFontSize}px ${fontStack}`; 
         
         const drawSubText = (text: string, y: number, alpha: number) => {
           ctx.save();
           ctx.translate(canvas.width / 2, y);
-          const scale = 0.95 + (alpha * 0.05); // slight scale up with fade
+          const entranceScale = 0.95 + (alpha * 0.05); // slight scale up with fade
+          const maxTextWidth = canvas.width * (isPortrait ? 0.78 : 0.7);
+          const fitScale = Math.min(1, maxTextWidth / Math.max(1, ctx.measureText(text).width));
+          const scale = entranceScale * fitScale;
           ctx.scale(scale, scale);
           
-          if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = '8px'; }
+          if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = `${Math.round(shortSide * 0.007)}px`; }
           ctx.lineJoin = 'round';
-          ctx.lineWidth = 10; 
+          ctx.lineWidth = subFontSize * 0.3; 
           ctx.shadowColor = `rgba(0, 0, 0, ${alpha * 0.9})`;
-          ctx.shadowBlur = 15;
-          ctx.shadowOffsetY = 5;
+          ctx.shadowBlur = subFontSize * 0.45;
+          ctx.shadowOffsetY = subFontSize * 0.16;
           ctx.strokeStyle = `rgba(10, 5, 0, ${alpha * 1.0})`;
           ctx.strokeText(text, 0, 0);
           
@@ -525,8 +739,8 @@ CRITICAL STYLE REQUIREMENTS:
           ctx.restore();
         };
 
-        const yPos1 = 420; // Tight below the main title (320 + 80 = 400 + 20 px padding)
-        const yPos2 = 470;
+        const yPos1 = subtitleY1;
+        const yPos2 = subtitleY2;
 
         if (sub1Alpha > 0 && sub2Alpha > 0 && subtitle1 && subtitle2) {
           drawSubText(`${subtitle1}    ·    ${subtitle2}`, yPos1, sub1Alpha);
@@ -563,9 +777,9 @@ CRITICAL STYLE REQUIREMENTS:
         let accumulateY = 0;
         const itemYs = srtData.map(sub => {
           const lines = sub.text.split('\n').length;
-          const blockHeight = lines * 70; // Uniform block size calculation
+          const blockHeight = lines * lyricLineHeight; // Uniform block size calculation
           const y = accumulateY + blockHeight / 2;
-          accumulateY += blockHeight + 35; // 35px spacing between subtitle blocks
+          accumulateY += blockHeight + lyricBlockGap;
           return y;
         });
 
@@ -584,7 +798,7 @@ CRITICAL STYLE REQUIREMENTS:
           (stateRef.current as any).currentScrollY += (stateRef.current as any).scrollVelocity;
         }
 
-        const centerBaseY = canvas.height - 350; 
+        const centerBaseY = lyricCenterY; 
         const currentScrollY = (stateRef.current as any).currentScrollY;
 
         // Initialize smoothActives tracking array
@@ -597,7 +811,7 @@ CRITICAL STYLE REQUIREMENTS:
           const rawYOffset = centerBaseY + itemYs[i] - currentScrollY;
           
           // Cull items too far off-screen
-          if (rawYOffset < centerBaseY - 550 || rawYOffset > centerBaseY + 550) {
+          if (rawYOffset < centerBaseY - lyricCullDistance || rawYOffset > centerBaseY + lyricCullDistance) {
               const isActive = (i === activeIndex);
               smoothActives[i] += ((isActive ? 1 : 0) - smoothActives[i]) * 0.12; // Update state even when culled
               continue;
@@ -613,11 +827,11 @@ CRITICAL STYLE REQUIREMENTS:
           
           // Normalized distance for parallax and fading (-1 to 1 around focal point)
           const distFromCenter = Math.abs(rawYOffset - centerBaseY);
-          const normalizedDist = distFromCenter / 450; 
+          const normalizedDist = distFromCenter / lyricFadeDistance; 
           
           // Parallax Y offset compresses items smoothly towards edges
           const signY = Math.sign(rawYOffset - centerBaseY);
-          const parallaxShift = (1 - Math.cos(Math.min(1, normalizedDist) * Math.PI / 2)) * 100;
+          const parallaxShift = (1 - Math.cos(Math.min(1, normalizedDist) * Math.PI / 2)) * shortSide * (isPortrait ? 0.07 : 0.093);
           const finalYOffset = rawYOffset - signY * parallaxShift;
 
           // Compute uniform continuous scaling base
@@ -635,27 +849,30 @@ CRITICAL STYLE REQUIREMENTS:
           // Calculate alpha continuously based on distance
           const alphaMod = Math.max(0, 1 - Math.pow(Math.min(1, normalizedDist), 1.2));
           
-          const baseLineHeight = 75; // Internal line height for multi-line subtitles
+          const baseLineHeight = lyricLineHeight; // Internal line height for multi-line subtitles
           const blockHeight = lines.length * baseLineHeight;
           const startY = finalYOffset - (blockHeight / 2) + (baseLineHeight / 2);
           
           lines.forEach((line, lineIdx) => {
             const y = startY + (lineIdx * baseLineHeight * (baseScale * (0.65 + 0.35 * actRatio))); // adjust internal spacing smoothly
             
+            // Parametric completely smooth rendering
+            ctx.font = `600 ${lyricFontSize}px ${fontStack}`;
+            const maxLineWidth = canvas.width * (isPortrait ? 0.84 : 0.78);
+            const lineFitScale = Math.min(1, maxLineWidth / Math.max(1, ctx.measureText(line).width));
+
             ctx.save();
             ctx.translate(canvas.width / 2, y);
-            ctx.scale(renderScale, renderScale);
-            
-            // Parametric completely smooth rendering
-            ctx.font = `600 64px ${fontStack}`;
+            ctx.scale(renderScale * lineFitScale, renderScale * lineFitScale);
+
             const spacing = Math.round(3 + 3 * actRatio);
             if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = `${spacing}px`; }
             
             ctx.lineJoin = 'round';
-            ctx.lineWidth = 10 + actRatio * 2;
+            ctx.lineWidth = lyricFontSize * 0.16 + actRatio * 2;
             ctx.shadowColor = `rgba(0, 0, 0, ${(0.9 + actRatio * 0.1) * alphaMod})`;
-            ctx.shadowBlur = 12 + actRatio * 13;
-            ctx.shadowOffsetY = 6 + actRatio * 2;
+            ctx.shadowBlur = lyricFontSize * 0.19 + actRatio * 13;
+            ctx.shadowOffsetY = lyricFontSize * 0.09 + actRatio * 2;
             ctx.strokeStyle = `rgba(10, 5, 0, ${(0.8 + actRatio * 0.2) * alphaMod})`;
             ctx.strokeText(line, 0, 0);
             
@@ -690,8 +907,6 @@ CRITICAL STYLE REQUIREMENTS:
         const dataArray = new Uint8Array(bufferLength);
         analyserRef.current.getByteFrequencyData(dataArray);
 
-        const visualizerY = canvas.height - 120;
-        
         ctx.shadowColor = 'rgba(255, 245, 230, 0.5)';
         ctx.shadowBlur = 15;
 
@@ -707,9 +922,10 @@ CRITICAL STYLE REQUIREMENTS:
 
         if (stateRef.current.visualizerStyle === 'spectrum') {
           // Spectrum Logic (Bar chart style originating from bottom edge)
-          const numBars = 120;
+          const numBars = isPortrait ? 72 : 120;
           const barSpacing = canvas.width / numBars;
           const barWidth = Math.max(2, barSpacing - 4);
+          const maxBarHeight = shortSide * (isPortrait ? 0.26 : 0.37);
           
           for (let i = 0; i < numBars; i++) {
             const dataIndex = Math.floor(i * (bufferLength / 2 / numBars));
@@ -720,7 +936,7 @@ CRITICAL STYLE REQUIREMENTS:
               val = Math.min(1, val * (1 + (bassVolume / 255) * 0.2));
             }
             
-            const height = Math.max(val * 400, 10);
+            const height = Math.max(val * maxBarHeight, 10);
             
             const x = i * barSpacing;
             const y = canvas.height - height;
@@ -742,10 +958,11 @@ CRITICAL STYLE REQUIREMENTS:
           }
         } else {
           // Default Waveform Logic
-          const numBars = 160; 
-          const barSpacing = Math.floor((canvas.width * 0.7) / numBars); 
-          const barWidth = 6; 
+          const numBars = isPortrait ? 112 : 160; 
+          const barSpacing = Math.max(4, Math.floor((canvas.width * (isPortrait ? 0.78 : 0.7)) / numBars)); 
+          const barWidth = Math.max(3, Math.min(isPortrait ? 5 : 6, barSpacing * 0.55)); 
           const startX = (canvas.width - (numBars * barSpacing)) / 2;
+          const maxWaveHeight = shortSide * (isPortrait ? 0.12 : 0.167);
           
           // Subtle pulse based on bass frequency
           const pulse = 1 + Math.max(0, (bassVolume / 255) - 0.3) * 0.15; // Only pulse on strong bass
@@ -759,7 +976,7 @@ CRITICAL STYLE REQUIREMENTS:
             const dataIndex = Math.floor(i * (bufferLength / 2.5 / numBars));
             const val = dataArray[dataIndex] / 255.0;
             
-            const height = Math.max(val * 180, 8);
+            const height = Math.max(val * maxWaveHeight, 8);
             
             ctx.beginPath();
             if (ctx.roundRect) {
@@ -826,6 +1043,14 @@ CRITICAL STYLE REQUIREMENTS:
     }
 
     try {
+      if (fullRecordingUrl) URL.revokeObjectURL(fullRecordingUrl);
+      if (smartCropUrl) URL.revokeObjectURL(smartCropUrl);
+      setFullRecordingUrl(null);
+      setFullRecordingBlob(null);
+      setSmartCropUrl(null);
+      setSmartCropRange(null);
+      setSmartCropProgress(0);
+
       const canvasStream = canvasRef.current.captureStream(60); // 60 fps
       const audioStream = destStreamRef.current.stream;
 
@@ -834,17 +1059,7 @@ CRITICAL STYLE REQUIREMENTS:
         ...audioStream.getAudioTracks()
       ]);
 
-      let selectedMimeType = '';
-      const typesToTry = exportFormat === 'mp4' 
-        ? ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus'] // Prefer high quality
-        : ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
-
-      for (const type of typesToTry) {
-        if (MediaRecorder.isTypeSupported(type)) {
-          selectedMimeType = type;
-          break;
-        }
-      }
+      const selectedMimeType = getSupportedVideoMimeType(exportFormat);
 
       const recorderOptions: MediaRecorderOptions = { 
         mimeType: selectedMimeType || undefined,
@@ -862,7 +1077,10 @@ CRITICAL STYLE REQUIREMENTS:
         const actualMimeType = recorder.mimeType || selectedMimeType || 'video/webm';
         const blob = new Blob(chunks, { type: actualMimeType });
         const url = URL.createObjectURL(blob);
-        setVideoOutputUrl(url);
+        setFullRecordingUrl(url);
+        setFullRecordingBlob(blob);
+        setSmartCropUrl(null);
+        setSmartCropRange(null);
         setIsRecording(false);
         setRecordingProgress(0);
       };
@@ -891,6 +1109,161 @@ CRITICAL STYLE REQUIREMENTS:
     }
   };
 
+  const smartCropRecording = async () => {
+    if (!audioFile || !fullRecordingBlob) {
+      alert("请先完成整首歌录制，再进行智能裁剪。");
+      return;
+    }
+
+    setIsSmartCropping(true);
+    setSmartCropProgress(0);
+    setSmartCropRange(null);
+
+    try {
+      const segment = await findHighlightSegment(audioFile, 60);
+      setSmartCropProgress(5);
+
+      const sourceUrl = URL.createObjectURL(fullRecordingBlob);
+      const video = document.createElement('video');
+      video.src = sourceUrl;
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = 'auto';
+      video.crossOrigin = 'anonymous';
+
+      await new Promise<void>((resolve, reject) => {
+        video.onloadedmetadata = () => resolve();
+        video.onerror = () => reject(new Error("无法读取录制视频。"));
+      });
+
+      const cropStart = Math.min(segment.start, Math.max(0, video.duration - 0.1));
+      const cropEnd = Math.min(segment.end, video.duration);
+      if (cropEnd <= cropStart) {
+        URL.revokeObjectURL(sourceUrl);
+        throw new Error("录制视频时长不足，无法裁剪。");
+      }
+      setSmartCropRange({ start: cropStart, end: cropEnd });
+
+      const captureStream = (video as HTMLVideoElement & {
+        captureStream?: () => MediaStream;
+        mozCaptureStream?: () => MediaStream;
+      }).captureStream || (video as HTMLVideoElement & {
+        mozCaptureStream?: () => MediaStream;
+      }).mozCaptureStream;
+
+      if (!captureStream) {
+        URL.revokeObjectURL(sourceUrl);
+        throw new Error("当前浏览器不支持视频片段裁剪，请使用 Chrome 或 Edge。");
+      }
+
+      const selectedMimeType = getSupportedVideoMimeType(exportFormat);
+      const videoStream = captureStream.call(video);
+
+      const audioContext = new AudioContext();
+      const audioArrayBuffer = await audioFile.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(audioArrayBuffer);
+      const audioSource = audioContext.createBufferSource();
+      audioSource.buffer = audioBuffer;
+      const audioGain = audioContext.createGain();
+      audioGain.gain.value = 0.92;
+      const audioDest = audioContext.createMediaStreamDestination();
+      audioSource.connect(audioGain);
+      audioGain.connect(audioDest);
+
+      const stream = new MediaStream([
+        ...videoStream.getVideoTracks(),
+        ...audioDest.stream.getAudioTracks(),
+      ]);
+      const recorder = new MediaRecorder(stream, {
+        mimeType: selectedMimeType || undefined,
+        videoBitsPerSecond: 12000000,
+        audioBitsPerSecond: 192000,
+      });
+      const chunks: Blob[] = [];
+      const cropDuration = Math.max(0.1, cropEnd - cropStart);
+
+      recorder.ondataavailable = e => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+
+      const croppedBlob = await new Promise<Blob>((resolve, reject) => {
+        let rafId = 0;
+        let didStart = false;
+        let didCleanup = false;
+        const cleanup = () => {
+          if (didCleanup) return;
+          didCleanup = true;
+          cancelAnimationFrame(rafId);
+          video.pause();
+          try {
+            audioSource.stop();
+          } catch {
+            // Source may already be stopped after the selected segment.
+          }
+          stream.getTracks().forEach(track => track.stop());
+          videoStream.getTracks().forEach(track => track.stop());
+          URL.revokeObjectURL(sourceUrl);
+          void audioContext.close();
+        };
+
+        recorder.onerror = () => {
+          cleanup();
+          reject(new Error("智能裁剪录制失败。"));
+        };
+
+        recorder.onstop = () => {
+          cleanup();
+          const actualMimeType = recorder.mimeType || selectedMimeType || 'video/webm';
+          resolve(new Blob(chunks, { type: actualMimeType }));
+        };
+
+        const tick = () => {
+          const elapsed = Math.max(0, video.currentTime - cropStart);
+          setSmartCropProgress(Math.min(99, 5 + (elapsed / cropDuration) * 94));
+          if (video.currentTime >= cropEnd || video.ended) {
+            if (recorder.state !== 'inactive') recorder.stop();
+            return;
+          }
+          rafId = requestAnimationFrame(tick);
+        };
+
+        const startCapture = async () => {
+          if (didStart) return;
+          didStart = true;
+          try {
+            recorder.start(1000);
+            if (audioContext.state === 'suspended') {
+              await audioContext.resume();
+            }
+            await video.play();
+            audioSource.start(0, cropStart, cropDuration);
+            tick();
+          } catch (err) {
+            cleanup();
+            reject(err);
+          }
+        };
+
+        video.onseeked = startCapture;
+        if (cropStart <= 0.05) {
+          startCapture();
+        } else {
+          video.currentTime = cropStart;
+        }
+      });
+
+      if (smartCropUrl) URL.revokeObjectURL(smartCropUrl);
+      const croppedUrl = URL.createObjectURL(croppedBlob);
+      setSmartCropUrl(croppedUrl);
+      setSmartCropProgress(100);
+    } catch (err) {
+      console.error("Smart crop failed:", err);
+      alert("智能裁剪失败：" + (err as Error).message);
+    } finally {
+      setIsSmartCropping(false);
+    }
+  };
+
   // When audio ends, stop recording automatically
   const handleAudioEnded = () => {
     setIsPlaying(false);
@@ -904,6 +1277,17 @@ CRITICAL STYLE REQUIREMENTS:
     const s = Math.floor(seconds % 60);
     return `${m}:${s.toString().padStart(2, '0')}`;
   }
+
+  const downloadExports = () => {
+    if (!fullRecordingUrl) return;
+
+    downloadBlobUrl(fullRecordingUrl, `music_video_full.${exportFormat}`);
+    if (smartCropUrl) {
+      window.setTimeout(() => {
+        downloadBlobUrl(smartCropUrl, `music_video_highlight.${exportFormat}`);
+      }, 250);
+    }
+  };
 
   return (
     <div className="h-screen bg-[#0A0A0A] text-[#F5F5F5] font-sans flex flex-col overflow-hidden">
@@ -928,17 +1312,43 @@ CRITICAL STYLE REQUIREMENTS:
                 Stop
               </button>
             </div>
-          ) : videoOutputUrl ? (
-            <div className="flex gap-4">
-              <a 
-                href={videoOutputUrl} 
-                download={`music_video.${exportFormat}`} 
+          ) : fullRecordingUrl ? (
+            <div className="flex gap-4 items-center">
+              {isSmartCropping ? (
+                <div className="text-[10px] uppercase tracking-widest text-amber-300 flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-amber-300 animate-pulse"></div>
+                  Smart Cut {Math.round(smartCropProgress)}%
+                </div>
+              ) : smartCropRange ? (
+                <div className="text-[10px] uppercase tracking-widest text-white/50">
+                  Highlight {formatTime(smartCropRange.start)} - {formatTime(smartCropRange.end)}
+                </div>
+              ) : null}
+              <button
+                onClick={downloadExports}
+                disabled={isSmartCropping}
                 className="px-6 py-2 bg-white text-black text-[10px] uppercase tracking-[0.2em] font-bold transition-colors text-center flex items-center"
               >
-                Download {exportFormat.toUpperCase()}
-              </a>
+                {smartCropUrl ? `Download Both ${exportFormat.toUpperCase()}` : `Download Full ${exportFormat.toUpperCase()}`}
+              </button>
+              <button
+                onClick={smartCropRecording}
+                disabled={isSmartCropping || !fullRecordingBlob}
+                className="px-6 py-2 border border-amber-300/40 text-amber-200 text-[10px] uppercase tracking-[0.2em] font-bold hover:bg-amber-300/10 transition-colors disabled:opacity-50"
+              >
+                {isSmartCropping ? 'Cutting...' : 'Smart Cut 60s'}
+              </button>
               <button 
-                onClick={() => setVideoOutputUrl(null)} 
+                onClick={() => {
+                  if (fullRecordingUrl) URL.revokeObjectURL(fullRecordingUrl);
+                  if (smartCropUrl) URL.revokeObjectURL(smartCropUrl);
+                  setFullRecordingUrl(null);
+                  setFullRecordingBlob(null);
+                  setSmartCropUrl(null);
+                  setSmartCropRange(null);
+                  setSmartCropProgress(0);
+                }}
+                disabled={isSmartCropping}
                 className="px-6 py-2 border border-white/20 text-white text-[10px] uppercase tracking-[0.2em] font-bold hover:bg-white/10 transition-colors"
               >
                 Clear
@@ -946,6 +1356,30 @@ CRITICAL STYLE REQUIREMENTS:
             </div>
           ) : (
             <div className="flex items-center gap-4">
+              <div className="flex border border-white/20">
+                {(['landscape', 'portrait'] as VideoOrientation[]).map(orientation => {
+                  const selected = videoOrientation === orientation;
+                  const config = VIDEO_ORIENTATION_CONFIG[orientation];
+                  const Icon = orientation === 'landscape' ? Monitor : Smartphone;
+                  return (
+                    <button
+                      key={orientation}
+                      type="button"
+                      onClick={() => setVideoOrientation(orientation)}
+                      disabled={isRecording}
+                      title={`${config.label} ${config.aspectRatio}`}
+                      className={`h-[34px] px-3 flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] transition-colors disabled:opacity-50 ${
+                        selected
+                          ? 'bg-white text-black'
+                          : 'bg-transparent text-white/60 hover:bg-white/10 hover:text-white'
+                      }`}
+                    >
+                      <Icon className="w-3.5 h-3.5" />
+                      {config.aspectRatio}
+                    </button>
+                  );
+                })}
+              </div>
               <select 
                 value={exportFormat}
                 onChange={e => setExportFormat(e.target.value as 'webm' | 'mp4')}
@@ -1127,7 +1561,7 @@ CRITICAL STYLE REQUIREMENTS:
               )}
             </div>
             <div className="space-y-4">
-              <label className="aspect-video bg-white/5 border border-dashed border-white/20 flex flex-col items-center justify-center gap-4 group cursor-pointer hover:bg-white/10 transition-colors relative overflow-hidden">
+              <label className={`${isPortrait ? 'aspect-[9/16] max-h-80 mx-auto w-[56%] min-w-32' : 'aspect-video w-full'} bg-white/5 border border-dashed border-white/20 flex flex-col items-center justify-center gap-4 group cursor-pointer hover:bg-white/10 transition-colors relative overflow-hidden`}>
                  {imageElement && (
                    <img src={imageElement.src} alt="bg" className="absolute inset-0 w-full h-full object-cover opacity-50 mix-blend-luminosity" />
                  )}
@@ -1196,11 +1630,11 @@ CRITICAL STYLE REQUIREMENTS:
             )}
             
             {/* Canvas Container */}
-            <div className="w-full max-w-[1920px] aspect-video bg-[#0A0A0A] overflow-hidden relative z-10 border border-white/10 shadow-[0_0_50px_rgba(0,0,0,0.8)] flex items-center justify-center mix-blend-screen">
+            <div className={`${isPortrait ? 'h-full max-h-full aspect-[9/16]' : 'w-full max-w-[1920px] aspect-video'} bg-[#0A0A0A] overflow-hidden relative z-10 border border-white/10 shadow-[0_0_50px_rgba(0,0,0,0.8)] flex items-center justify-center mix-blend-screen`}>
               <canvas
                 ref={canvasRef}
-                width={1920}
-                height={1080}
+                width={videoConfig.width}
+                height={videoConfig.height}
                 className="w-full h-full object-contain"
               />
             </div>
@@ -1286,8 +1720,9 @@ CRITICAL STYLE REQUIREMENTS:
       {/* Bottom Bar Info */}
       <footer className="px-8 py-3 bg-[#050505] border-t border-white/5 flex justify-between items-center text-[9px] uppercase tracking-[0.2em] text-white/30 shrink-0">
         <div className="flex gap-6">
-          <span>Resolution: 4K (3840x2160)</span>
-          <span>Frame Rate: 30fps</span>
+          <span>Resolution: {videoConfig.width}x{videoConfig.height}</span>
+          <span>Aspect: {videoConfig.aspectRatio}</span>
+          <span>Frame Rate: 60fps</span>
         </div>
         <div className="flex gap-4 items-center">
           <span className={audioUrl ? "text-white/60" : "text-white/30"}>System Ready</span>

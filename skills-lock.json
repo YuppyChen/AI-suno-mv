@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "Suno Song Creator": {
+      "source": "nwp/suno-song-creator-plugin",
+      "sourceType": "github",
+      "skillPath": "skills/suno-song-creator/SKILL.md",
+      "computedHash": "35bd6d61e7fec709ef241da2d319e8c2695c7d7ca6fe4786c4a65a11007785ae"
+    }
+  }
+}

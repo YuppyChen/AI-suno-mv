@@ -10,6 +10,7 @@ interface Subtitle {
 
 type VideoOrientation = 'landscape' | 'portrait';
 type VisualizerStyle = 'waveform' | 'spectrum';
+type Language = 'zh' | 'en';
 
 const VIDEO_ORIENTATION_CONFIG: Record<VideoOrientation, {
   label: string;
@@ -38,6 +39,81 @@ const DEFAULT_ASSETS = {
   },
   image: '/default-assets/default-cover.jpg',
   srt: '/default-assets/default-subtitles.srt',
+};
+
+const I18N: Record<Language, Record<string, string>> = {
+  zh: {
+    appTitle: 'MV 编辑器',
+    language: '语言',
+    soundSource: '01 / 音频源',
+    selectAudio: '选择音频文件',
+    audioLoaded: '音频已加载',
+    readyPlayback: '可直接播放',
+    typographyMeta: '02 / 字幕与元数据',
+    subtitleTrack: '03 / 字幕轨道',
+    background: '04 / 背景',
+    visualizer: '05 / 频谱',
+    byok: '06 / BYOK',
+    apiKeyLabel: 'Gemini API Key',
+    testConnection: '测试连通性',
+    testing: '测试中...',
+    testSuccess: '连通成功',
+    testFailed: '连通失败',
+    createApiKey: '创建 API Key',
+    watermark: '06 / 水印',
+    watermarkText: '水印文本',
+    mainTitle: '主标题',
+    subtitle1: '副标题 1',
+    subtitle2: '副标题 2',
+    srtFileEdit: 'SRT 文件 / 编辑',
+    save: '保存',
+    clear: '清空',
+    autoGeneratingSubtitles: 'AI 自动生成字幕中...',
+    autoRecognizeSubtitles: 'AI 自动识别字幕',
+    srtPlaceholder: '在这里粘贴或编辑 SRT 内容...',
+    uploadImage: '上传图片',
+    aiGenerateCover: '或通过 AI 生成（油画风格）',
+    optionalCoverPrompt: '可选：描述你的封面图...',
+    generating: '生成中...',
+    generateAiCover: '生成 AI 封面',
+    downloadCover: '下载封面',
+  },
+  en: {
+    appTitle: 'MV Composer',
+    language: 'Language',
+    soundSource: '01 / Sound Source',
+    selectAudio: 'Select Audio File',
+    audioLoaded: 'Audio Loaded',
+    readyPlayback: 'Ready for playback',
+    typographyMeta: '02 / Typography Metadata',
+    subtitleTrack: '03 / Subtitle Track',
+    background: '04 / Background',
+    visualizer: '05 / Visualizer',
+    byok: '06 / BYOK',
+    apiKeyLabel: 'Gemini API Key',
+    testConnection: 'Test Connectivity',
+    testing: 'Testing...',
+    testSuccess: 'Connection Success',
+    testFailed: 'Connection Failed',
+    createApiKey: 'Create API Key',
+    watermark: '06 / Watermark',
+    watermarkText: 'Watermark Text',
+    mainTitle: 'Main Title',
+    subtitle1: 'Subtitle 1',
+    subtitle2: 'Subtitle 2',
+    srtFileEdit: 'SRT File / Edit',
+    save: 'Save',
+    clear: 'Clear',
+    autoGeneratingSubtitles: 'Auto-Generating AI Subtitles...',
+    autoRecognizeSubtitles: 'Auto-Recognize Subtitles (AI)',
+    srtPlaceholder: 'Paste or edit SRT content here...',
+    uploadImage: 'Upload Image',
+    aiGenerateCover: 'Or Generate via AI (Oil Painting)',
+    optionalCoverPrompt: 'Optional: Describe your cover image...',
+    generating: 'Generating...',
+    generateAiCover: 'Generate AI Cover',
+    downloadCover: 'Download Cover',
+  },
 };
 
 function timeToSeconds(timeStr: string) {
@@ -206,10 +282,14 @@ async function findHighlightSegment(audioFile: File, maxDuration = 60): Promise<
 }
 
 export default function App() {
+  const [language, setLanguage] = useState<Language>('zh');
+  const t = (key: string) => I18N[language][key] || key;
+
   // Input State
   const [title, setTitle] = useState('春天里');
   const [subtitle1, setSubtitle1] = useState('原唱：汪峰');
   const [subtitle2, setSubtitle2] = useState('风格：R&B');
+  const [watermarkText, setWatermarkText] = useState('SoulRewrite');
   const [srtData, setSrtData] = useState<Subtitle[]>([]);
   
   // Media State
@@ -233,6 +313,9 @@ export default function App() {
   // AI Cover Generation State
   const [isGeneratingCover, setIsGeneratingCover] = useState(false);
   const [coverPrompt, setCoverPrompt] = useState('');
+  const [byokApiKey, setByokApiKey] = useState('');
+  const [isTestingByok, setIsTestingByok] = useState(false);
+  const [byokTestMessage, setByokTestMessage] = useState('');
   
   // Metadata extraction state
   const [isExtractingMeta, setIsExtractingMeta] = useState(false);
@@ -243,7 +326,7 @@ export default function App() {
 
   // Export Settings
   const [exportFormat, setExportFormat] = useState<'webm' | 'mp4'>('mp4');
-  const [videoOrientation, setVideoOrientation] = useState<VideoOrientation>('portrait');
+  const [videoOrientation, setVideoOrientation] = useState<VideoOrientation>('landscape');
   const videoConfig = VIDEO_ORIENTATION_CONFIG[videoOrientation];
   const isPortrait = videoOrientation === 'portrait';
 
@@ -261,11 +344,49 @@ export default function App() {
   const particlesRef = useRef<{x: number, y: number, vx: number, vy: number, alpha: number, size: number, hue: number}[]>([]);
   
   // Ref for canvas loop to access latest state without restarting loop
-  const stateRef = useRef({ title, subtitle1, subtitle2, srtData, imageElement, visualizerStyle, videoOrientation });
+  const stateRef = useRef({ title, subtitle1, subtitle2, srtData, imageElement, visualizerStyle, videoOrientation, watermarkText });
 
   useEffect(() => {
-    stateRef.current = { title, subtitle1, subtitle2, srtData, imageElement, visualizerStyle, videoOrientation };
-  }, [title, subtitle1, subtitle2, srtData, imageElement, visualizerStyle, videoOrientation]);
+    stateRef.current = { title, subtitle1, subtitle2, srtData, imageElement, visualizerStyle, videoOrientation, watermarkText };
+  }, [title, subtitle1, subtitle2, srtData, imageElement, visualizerStyle, videoOrientation, watermarkText]);
+
+  useEffect(() => {
+    const cachedKey = localStorage.getItem('gemini_byok_api_key');
+    if (cachedKey) {
+      setByokApiKey(cachedKey);
+    }
+  }, []);
+
+  const resolveApiKey = () => {
+    return byokApiKey.trim() || process.env.GEMINI_API_KEY || '';
+  };
+
+  const saveByokKey = (value: string) => {
+    setByokApiKey(value);
+    localStorage.setItem('gemini_byok_api_key', value);
+  };
+
+  const testByokConnection = async () => {
+    const apiKey = resolveApiKey();
+    if (!apiKey) {
+      setByokTestMessage(`${t('testFailed')}: API Key 为空`);
+      return;
+    }
+    setIsTestingByok(true);
+    setByokTestMessage('');
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: { role: 'user', parts: [{ text: 'ping' }] },
+      });
+      setByokTestMessage(t('testSuccess'));
+    } catch (err) {
+      setByokTestMessage(`${t('testFailed')}: ${(err as Error).message}`);
+    } finally {
+      setIsTestingByok(false);
+    }
+  };
 
   useEffect(() => {
     let isCancelled = false;
@@ -332,7 +453,9 @@ export default function App() {
   const generateCover = async () => {
     setIsGeneratingCover(true);
     try {
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const apiKey = resolveApiKey();
+        if (!apiKey) throw new Error('Missing Gemini API Key');
+        const ai = new GoogleGenAI({ apiKey });
         
         let lyricsContext = "";
         if (srtData && srtData.length > 0) {
@@ -437,7 +560,9 @@ CRITICAL STYLE REQUIREMENTS:
     if (!audioFile) return;
     setIsGeneratingSubtitles(true);
     try {
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const apiKey = resolveApiKey();
+        if (!apiKey) throw new Error('Missing Gemini API Key');
+        const ai = new GoogleGenAI({ apiKey });
         const base64Audio = await fileToBase64(audioFile);
         const base64Data = base64Audio.split(',')[1];
         
@@ -487,7 +612,9 @@ CRITICAL STYLE REQUIREMENTS:
 
     setIsExtractingMeta(true);
     try {
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const apiKey = resolveApiKey();
+        if (!apiKey) throw new Error('Missing Gemini API Key');
+        const ai = new GoogleGenAI({ apiKey });
         const response = await ai.models.generateContent({
             model: 'gemini-3-flash-preview',
             contents: {
@@ -562,7 +689,7 @@ CRITICAL STYLE REQUIREMENTS:
       const ctx = canvas?.getContext('2d');
       if (!canvas || !ctx) return;
 
-      const { title, subtitle1, subtitle2, srtData, imageElement, videoOrientation } = stateRef.current;
+      const { title, subtitle1, subtitle2, srtData, imageElement, videoOrientation, watermarkText } = stateRef.current;
       const isPortrait = videoOrientation === 'portrait';
       const shortSide = Math.min(canvas.width, canvas.height);
       const frameMargin = Math.round(shortSide * (isPortrait ? 0.045 : 0.055));
@@ -681,7 +808,7 @@ CRITICAL STYLE REQUIREMENTS:
       ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
       ctx.textAlign = 'center';
       if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = '12px'; }
-      ctx.fillText('AUDIO VISUAL // 01', canvas.width / 2, metaY);
+      ctx.fillText(watermarkText || 'SoulRewrite', canvas.width / 2, metaY);
       if ('letterSpacing' in ctx) { (ctx as any).letterSpacing = '0px'; }
 
       // 2. Draw Title & Meta
@@ -1296,9 +1423,55 @@ CRITICAL STYLE REQUIREMENTS:
         <div className="flex items-center gap-4">
           <span className="text-xs tracking-[0.4em] font-bold uppercase">Studio / V01</span>
           <span className="h-4 w-[1px] bg-white/20"></span>
-          <h1 className="text-sm font-light tracking-widest uppercase">MV Composer</h1>
+          <h1 className="text-sm font-light tracking-widest uppercase">{t('appTitle')}</h1>
+          <details className="relative">
+            <summary className="list-none cursor-pointer px-2 py-1 border border-white/20 text-[10px] uppercase tracking-[0.16em] text-white/80 hover:bg-white/10">
+              BYOK
+            </summary>
+            <div className="absolute left-0 top-full mt-2 w-80 bg-[#111] border border-white/20 p-4 z-50 space-y-3">
+              <label className="text-[10px] text-white/40 uppercase tracking-widest block">{t('apiKeyLabel')}</label>
+              <input
+                type="password"
+                value={byokApiKey}
+                onChange={e => saveByokKey(e.target.value)}
+                placeholder="AIza..."
+                className="w-full bg-transparent border-b border-white/20 py-2 text-sm text-white focus:outline-none focus:border-white transition-colors"
+              />
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={testByokConnection}
+                  disabled={isTestingByok}
+                  className="px-3 py-2 border border-white/20 text-white text-[10px] uppercase tracking-[0.16em] hover:bg-white/10 transition-colors disabled:opacity-50"
+                >
+                  {isTestingByok ? t('testing') : t('testConnection')}
+                </button>
+                <a
+                  href="https://aistudio.google.com/api-keys"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-[10px] uppercase tracking-[0.16em] text-amber-300 hover:text-amber-200"
+                >
+                  {t('createApiKey')}
+                </a>
+              </div>
+              {byokTestMessage && (
+                <p className="text-[11px] text-white/70">{byokTestMessage}</p>
+              )}
+            </div>
+          </details>
         </div>
         <div className="flex gap-8 items-center">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] uppercase tracking-[0.2em] text-white/60">{t('language')}</span>
+            <select
+              value={language}
+              onChange={e => setLanguage(e.target.value as Language)}
+              className="bg-transparent border border-white/20 text-white text-[10px] uppercase tracking-[0.15em] px-2 py-1 outline-none"
+            >
+              <option value="zh" className="bg-[#050505]">中文</option>
+              <option value="en" className="bg-[#050505]">English</option>
+            </select>
+          </div>
           {isRecording ? (
             <div className="flex items-center gap-4">
               <div className="text-[10px] uppercase tracking-widest text-red-500 flex items-center gap-2">
@@ -1406,14 +1579,14 @@ CRITICAL STYLE REQUIREMENTS:
         {/* Left: Source Assets Panel */}
         <aside className="border-r border-white/10 p-8 flex flex-col gap-10 bg-[#0F0F0F] overflow-y-auto">
           <section>
-            <span className="text-[10px] text-white/30 uppercase tracking-[0.3em] block mb-6 italic">01 / Sound Source</span>
+            <span className="text-[10px] text-white/30 uppercase tracking-[0.3em] block mb-6 italic">{t('soundSource')}</span>
             <label className="bg-white/5 border border-white/10 p-4 flex items-center gap-4 cursor-pointer hover:bg-white/10 transition-colors mb-4 group">
               <div className="w-10 h-10 bg-white/10 flex items-center justify-center shrink-0 group-hover:bg-white/20 transition-colors">
                 {audioUrl ? <div className="w-1 h-4 bg-white animate-pulse"></div> : <Music className="w-4 h-4 text-white/50" />}
               </div>
               <div className="flex-1 overflow-hidden">
-                <p className="text-xs font-medium truncate">{audioUrl ? "Audio Loaded" : "Select Audio File"}</p>
-                <p className="text-[10px] text-white/40">{audioUrl ? "Ready for playback" : "WAV, MP3, M4A"}</p>
+                <p className="text-xs font-medium truncate">{audioUrl ? t('audioLoaded') : t('selectAudio')}</p>
+                <p className="text-[10px] text-white/40">{audioUrl ? t('readyPlayback') : "WAV, MP3, M4A"}</p>
               </div>
               <input type="file" accept="audio/*" onChange={handleAudioUpload} className="hidden" />
             </label>
@@ -1421,12 +1594,12 @@ CRITICAL STYLE REQUIREMENTS:
 
           <section>
             <div className="flex items-center gap-3 mb-6">
-              <span className="text-[10px] text-white/30 uppercase tracking-[0.3em] italic">02 / Typography Metadata</span>
+              <span className="text-[10px] text-white/30 uppercase tracking-[0.3em] italic">{t('typographyMeta')}</span>
               {isExtractingMeta && <span className="text-[9px] text-red-500 uppercase tracking-widest animate-pulse">Auto-filling...</span>}
             </div>
             <div className="space-y-6">
               <div>
-                <label className="text-[10px] text-white/40 uppercase tracking-widest mb-2 block">Main Title</label>
+                <label className="text-[10px] text-white/40 uppercase tracking-widest mb-2 block">{t('mainTitle')}</label>
                 <input 
                   type="text" 
                   value={title} 
@@ -1435,7 +1608,7 @@ CRITICAL STYLE REQUIREMENTS:
                 />
               </div>
               <div>
-                <label className="text-[10px] text-white/40 uppercase tracking-widest mb-2 block">Subtitle 1</label>
+                <label className="text-[10px] text-white/40 uppercase tracking-widest mb-2 block">{t('subtitle1')}</label>
                 <input 
                   type="text" 
                   value={subtitle1} 
@@ -1444,7 +1617,7 @@ CRITICAL STYLE REQUIREMENTS:
                 />
               </div>
               <div>
-                <label className="text-[10px] text-white/40 uppercase tracking-widest mb-2 block">Subtitle 2</label>
+                <label className="text-[10px] text-white/40 uppercase tracking-widest mb-2 block">{t('subtitle2')}</label>
                 <input 
                   type="text" 
                   value={subtitle2} 
@@ -1456,11 +1629,11 @@ CRITICAL STYLE REQUIREMENTS:
           </section>
 
           <section>
-            <span className="text-[10px] text-white/30 uppercase tracking-[0.3em] block mb-6 italic">03 / Subtitle Track</span>
+            <span className="text-[10px] text-white/30 uppercase tracking-[0.3em] block mb-6 italic">{t('subtitleTrack')}</span>
             <div className="space-y-3">
               <div className="flex justify-between items-center text-[11px] border-b border-white/5 pb-2">
                 <label className="cursor-pointer group flex items-center">
-                  <span className="text-white/40 group-hover:text-white transition-colors uppercase tracking-widest">SRT File / Edit</span>
+                  <span className="text-white/40 group-hover:text-white transition-colors uppercase tracking-widest">{t('srtFileEdit')}</span>
                   <span className="text-white font-mono bg-white/10 px-2 py-1 rounded ml-4">{srtData.length > 0 ? `${srtData.length} lines` : '+ Upload'}</span>
                   <input type="file" accept=".srt" onChange={handleSrtUpload} className="hidden" />
                 </label>
@@ -1481,13 +1654,13 @@ CRITICAL STYLE REQUIREMENTS:
                       className="text-white/40 hover:text-white/80 transition-colors uppercase tracking-widest flex items-center gap-1"
                     >
                       <Download className="w-3 h-3" />
-                      Save
+                      {t('save')}
                     </button>
                     <button 
                       onClick={() => { setSrtData([]); setSrtRaw(''); }}
                       className="text-white/40 hover:text-white/80 transition-colors uppercase tracking-widest"
                     >
-                      Clear
+                      {t('clear')}
                     </button>
                   </div>
                 )}
@@ -1500,7 +1673,7 @@ CRITICAL STYLE REQUIREMENTS:
                   className="w-full bg-white/5 hover:bg-white/10 border border-white/10 text-white text-[10px] uppercase tracking-widest py-3 rounded mb-3 flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
                 >
                   {isGeneratingSubtitles ? <span className="animate-spin text-white">⟳</span> : <Sparkles className="w-3 h-3" />}
-                  {isGeneratingSubtitles ? "Auto-Generating AI Subtitles..." : "Auto-Recognize Subtitles (AI)"}
+                  {isGeneratingSubtitles ? t('autoGeneratingSubtitles') : t('autoRecognizeSubtitles')}
                 </button>
               )}
               
@@ -1535,7 +1708,7 @@ CRITICAL STYLE REQUIREMENTS:
                 <textarea
                     value={srtRaw}
                     onChange={handleSrtChange}
-                    placeholder="Paste or edit SRT content here..."
+                    placeholder={t('srtPlaceholder')}
                     className="w-full bg-[#111] border border-white/10 rounded p-3 text-xs text-white/80 font-mono placeholder:text-white/20 focus:outline-none focus:border-white/40 h-32 resize-y transition-colors leading-relaxed"
                 />
               )}
@@ -1544,7 +1717,7 @@ CRITICAL STYLE REQUIREMENTS:
 
           <section>
             <div className="flex items-center justify-between mb-6">
-              <span className="text-[10px] text-white/30 uppercase tracking-[0.3em] italic">04 / Background</span>
+              <span className="text-[10px] text-white/30 uppercase tracking-[0.3em] italic">{t('background')}</span>
               {imageElement && (
                 <button 
                   onClick={() => {
@@ -1553,7 +1726,7 @@ CRITICAL STYLE REQUIREMENTS:
                     a.download = 'generated_cover.jpg';
                     a.click();
                   }}
-                  title="Download Cover"
+                  title={t('downloadCover')}
                   className="text-white/40 hover:text-white hover:bg-white/10 p-1.5 rounded transition-colors flex items-center justify-center border border-transparent hover:border-white/20"
                 >
                   <Download className="w-4 h-4" />
@@ -1568,16 +1741,16 @@ CRITICAL STYLE REQUIREMENTS:
                  <div className="w-8 h-8 rounded-full border border-white/20 flex items-center justify-center group-hover:bg-white group-hover:text-black transition-colors relative z-10 bg-black/40 backdrop-blur-sm">
                    <span className="text-lg leading-none mb-[2px]">+</span>
                  </div>
-                 <span className="text-[9px] uppercase tracking-widest text-white/40 relative z-10 bg-black/40 px-2 py-1 backdrop-blur-sm">Upload Image</span>
+                 <span className="text-[9px] uppercase tracking-widest text-white/40 relative z-10 bg-black/40 px-2 py-1 backdrop-blur-sm">{t('uploadImage')}</span>
                  <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
               </label>
 
               <div className="pt-4 border-t border-white/10 space-y-3">
-                <span className="text-[9px] uppercase tracking-[0.2em] text-white/40 mb-2 block">Or Generate via AI (Oil Painting)</span>
+                <span className="text-[9px] uppercase tracking-[0.2em] text-white/40 mb-2 block">{t('aiGenerateCover')}</span>
                 <textarea
                   value={coverPrompt}
                   onChange={e => setCoverPrompt(e.target.value)}
-                  placeholder="Optional: Describe your cover image..."
+                  placeholder={t('optionalCoverPrompt')}
                   className="w-full bg-black/50 border border-white/20 rounded p-3 text-xs text-white font-serif placeholder:text-white/20 focus:outline-none focus:border-white/50 h-24 resize-none transition-colors"
                 />
                 <button
@@ -1590,7 +1763,7 @@ CRITICAL STYLE REQUIREMENTS:
                   ) : (
                     <Sparkles className="w-3 h-3" />
                   )}
-                  {isGeneratingCover ? 'Generating...' : 'Generate AI Cover'}
+                  {isGeneratingCover ? t('generating') : t('generateAiCover')}
                 </button>
               </div>
             </div>
@@ -1598,7 +1771,7 @@ CRITICAL STYLE REQUIREMENTS:
 
           <section>
             <div className="flex items-center justify-between mb-6">
-              <span className="text-[10px] text-white/30 uppercase tracking-[0.3em] italic">05 / Visualizer</span>
+              <span className="text-[10px] text-white/30 uppercase tracking-[0.3em] italic">{t('visualizer')}</span>
             </div>
             <div className="flex flex-wrap gap-2">
               {(['waveform', 'spectrum'] as VisualizerStyle[]).map(style => (
@@ -1614,6 +1787,19 @@ CRITICAL STYLE REQUIREMENTS:
                   {style.replace('-', ' ')}
                 </button>
               ))}
+            </div>
+          </section>
+
+          <section>
+            <span className="text-[10px] text-white/30 uppercase tracking-[0.3em] block mb-4 italic">{t('watermark')}</span>
+            <div>
+              <label className="text-[10px] text-white/40 uppercase tracking-widest block mb-2">{t('watermarkText')}</label>
+              <input
+                type="text"
+                value={watermarkText}
+                onChange={e => setWatermarkText(e.target.value)}
+                className="w-full bg-transparent border-b border-white/20 py-2 text-sm text-white focus:outline-none focus:border-white transition-colors"
+              />
             </div>
           </section>
         </aside>
